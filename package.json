@@ -1,0 +1,28 @@
+{
+  "name": "node-it8951",
+  "version": "0.0.1",
+  "description": "Nodejs driver for the Waveshare based IT8951 e-ink hat (E.g. 6 inch HD display)",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gaweee/epd2in13"
+  },
+  "keywords": [
+    "epaper",
+    "epd",
+    "waveshare",
+    "it8951"
+  ],
+  "author": "Gary Teo",
+  "license": "ISC",
+  "dependencies": {
+    "python-struct": "^1.1.3",
+    "rpio": "^2.4.2"
+  },
+  "devDependencies": {
+    "eslint": "^8.3.0"
+  }
+}
