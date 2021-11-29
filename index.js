@@ -14,16 +14,19 @@ const DISPLAY_UPDATE_MODE_GC16= 2; // For more documentation on display update m
 let DISPLAY_UPDATE_MODE_A2= 6; // A flashy update mode that can go from any gray scale color to any other gray scale color.
 
 const CMD_SYS_RUN = 0x0001;
-const CMD_GET_DEVICE_INFO = 0x0302;
-const CMD_READ_REGISTER = 0x0010;
-const CMD_WRITE_REGISTER = 0x0011;
-const CMD_DISPLAY_AREA = 0x0034
-const CMD_DISPLAY_AREA_BUFFER = 0x0037;
-const CMD_VCOM = 0x0039;
-const CMD_LOAD_IMAGE_AREA = 0x0021;
-const CMD_LOAD_IMAGE_END = 0x0022;
 const CMD_STANDBY = 0x0002;
 const CMD_SLEEP = 0x0003;
+const CMD_READ_REGISTER = 0x0010;
+const CMD_WRITE_REGISTER = 0x0011;
+
+const CMD_LOAD_IMAGE = 0x0020;
+const CMD_LOAD_IMAGE_AREA = 0x0021;
+const CMD_LOAD_IMAGE_END = 0x0022;
+
+const CMD_DISPLAY_AREA = 0x0034
+const CMD_DISPLAY_AREA_BUFFER = 0x0037;
+const CMD_GET_DEVICE_INFO = 0x0302;
+const CMD_VCOM = 0x0039;
 
 const REG_SYSTEM_BASE = 0;
 const REG_I80CPCR = REG_SYSTEM_BASE + 0x04;
@@ -60,6 +63,7 @@ const CONFIG = {
     VCOM: 2150, // Supports autodetection so if this is wrong, it will fix that for you
     BPP: 4, // Rendering BPP (can be changed as required before each draw or display call)
     ALIGN4BYTES: false, // Use to support BPP1 situations for some specific Waveshare devices
+    SWAP_BUFFER_ENDIANESS: true, // Repacks the buffer to Llittle Endian format
     ROTATION: ROTATE0 // Not yet in use
 };
 
@@ -73,6 +77,8 @@ class IT8951 {
     }
 
     init() {
+        this.initialized = true;
+
         this.gpio = rpio;
         this.gpio.init({ mapping: 'physical', gpiomem: false });
         
@@ -115,7 +121,7 @@ class IT8951 {
 
         if (this.VCOM != this.get_vcom()) {
             this.set_vcom(this.config.VCOM);
-            console.log("VCOM = ", (this.get_vcom() / 1000.0 * -1), 'v');
+            console.log("VCOM = ", (this.get_vcom() / 1000.0 * -1) + 'v');
         }
 
         // Initialize the display with a blank image.
@@ -152,6 +158,7 @@ class IT8951 {
         this.gpio.write(this.config.PINS.CS, this.gpio.HIGH);
 
         if (params) {
+            // All params are in 2 byte form
             for (const param of params) this.write_data(bytesFrom16(param));
         }
     }
@@ -165,6 +172,7 @@ class IT8951 {
         this.spi_write(bytesFrom16(preamble));
         this.wait_for_ready();
         
+        // for (let i=0; i<data.length; i++) this.spi_write([data[i]]);
         for (let i=0; i<data.length; i+=this.config.MAX_BUFFER_SIZE) {
             let chunk = data.slice(i, i + this.config.MAX_BUFFER_SIZE);
             this.spi_write(chunk);
@@ -245,17 +253,25 @@ class IT8951 {
         if (!h) h = this.height;
 
         // Workaround for the stupid 4-byte alignment found in https://www.waveshare.com/wiki/Template:EPaper_Codes_Descriptions-IT8951
-        if (this.config.ALIGN4BYTES) { 
+        if (this.config.ALIGN4BYTES && this.config.BPP === 1) { 
             x = roundTo32(x);
             w = roundTo32(w);
         }
 
         this.write_register(REG_MEMORY_CONV_LISAR + 2, (this.img_addr >> 16) & 0xFFFF); // One time shifting of img_addr 32 bit to 2 x 16 bits
         this.write_register(REG_MEMORY_CONV_LISAR, this.img_addr & 0xFFFF);
-
         // // Define the region being loaded.
         const params = [((ENDIAN_LITTLE << 8) | (mapBPP(this.config.BPP) << 4) | this.config.ROTATION), x, y, w, h];
         this.write_command(CMD_LOAD_IMAGE_AREA, params);
+        
+        if (this.config.SWAP_BUFFER_ENDIANESS) {
+            for (let i=0; i<Math.trunc(buffer.length/2) * 2; i+=2) {
+                let tmp = buffer[i]
+                buffer[i] = buffer[i+1];
+                buffer[i+1] = tmp;
+            }
+        }
+
         this.write_data(buffer);
         this.write_command(CMD_LOAD_IMAGE_END);
 
@@ -289,6 +305,7 @@ class IT8951 {
 	}
 
     reset() {
+        if (!this.initialized) return;
         this.gpio.write(this.config.PINS.RST, this.gpio.HIGH);
         this.wait(200);
         this.gpio.write(this.config.PINS.RST, this.gpio.LOW);
@@ -298,20 +315,28 @@ class IT8951 {
     }
 
     activate() {
+        if (!this.initialized) return;
         this.write_command(CMD_SYS_RUN);
     }
 
     standby() {
+        if (!this.initialized) return;
         this.write_command(CMD_STANDBY);
     }
 
     sleep() {
+        if (!this.initialized) return;
         this.write_command(CMD_SLEEP);
     }
 
     close() {
-        console.log('Shutdown');
+        if (!this.initialized) return;
+        this.initialized = false;
+
+        // this.wait(1500);
+        console.log('Setting display to standby');
         this.sleep();
+        this.wait(3000);
         this.gpio.spiEnd();
         this.gpio.exit();
     }
@@ -326,7 +351,7 @@ function mapBPP(bpp) {
         case 2:
             return 0;
         case 1:
-            return 3;
+            return 3;   // Hacking way of using 8bpp
     }
 }
 

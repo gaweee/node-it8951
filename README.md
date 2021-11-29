@@ -15,6 +15,9 @@ For the devices that support higher BPP, I would certainly recommend using those
 See: https://www.waveshare.com/wiki/Template:EPaper_Codes_Descriptions-IT8951  
 
 
+## In-Action Shot
+![Action Shot](https://i.postimg.cc/bwyHScRc/it8951.png)
+
 ## Dependencies
 1. [GPIO](https://github.com/jperkin/node-rpio)
 
@@ -94,6 +97,7 @@ Constructor that takes in a suite of parameters
         VCOM: 2150, // Supports autodetection so if this is wrong, it will fix that for you
         BPP: 4, // Rendering BPP (can be changed as required before each draw or display call). Valid values are 1, 2, 4
         ALIGN4BYTES: false, // Use to support BPP1 situations for some specific Waveshare devices
+        SWAP_BUFFER_ENDIANESS: true, // Repacks the buffer to Llittle Endian format
     };
 ```
 
