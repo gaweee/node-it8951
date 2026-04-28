@@ -19,7 +19,6 @@
   "author": "Gary Teo",
   "license": "ISC",
   "dependencies": {
-    "python-struct": "^1.1.3",
     "rpio": "^2.4.2"
   },
   "devDependencies": {
