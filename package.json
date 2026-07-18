@@ -1,8 +1,18 @@
 {
   "name": "node-it8951",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Nodejs driver for the Waveshare based IT8951 e-ink hat (E.g. 6 inch HD display)",
-  "main": "index.js",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./linux": "./lib/transports/linux-spi-gpio.js"
+  },
+  "files": [
+    "index.js",
+    "lib/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -18,8 +28,9 @@
   ],
   "author": "Gary Teo",
   "license": "ISC",
-  "dependencies": {
-    "rpio": "^2.4.2"
+  "optionalDependencies": {
+    "opengpio": "^2.0.2",
+    "spi-device": "^3.1.2"
   },
   "devDependencies": {
     "eslint": "^8.3.0"

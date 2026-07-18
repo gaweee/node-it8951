@@ -5,7 +5,7 @@
  * from the Python PaperTTY IT8951 Driver.
  *
  * Key features:
- *   - Fast, uses native GPIO libraries (rpio)
+ *   - Fast, uses an injectable SPI/GPIO transport
  *   - Auto VCOM Detection
  *   - Supports 1, 2, 4 Bits Per Pixel (BPP)
  *   - Remappable Pins
@@ -16,7 +16,18 @@
  * @see https://github.com/joukos/PaperTTY
  */
 
-const rpio = require('rpio');
+const LinuxSpiGpioTransport = require('./lib/transports/linux-spi-gpio');
+
+function createLogger(enabled = true) {
+	if (!enabled) {
+		return {
+			info() {},
+			warn() {},
+			error() {},
+		};
+	}
+	return console;
+}
 
 // Rotation constants (not yet in use)
 const ROTATE0 = 0;
@@ -66,7 +77,9 @@ const CONFIG = {
 		CS: 24,   // 8 BCM
 		BUSY: 18, // 24 BCM
 	},
-	VCOM: 2150,
+	// VCOM is panel-specific. Null preserves the controller's stored value;
+	// provide an explicit millivolt value only when intentionally overriding it.
+	VCOM: null,
 	BPP: 4,
 	ALIGN4BYTES: false,
 	SWAP_BUFFER_ENDIANESS: true,
@@ -79,69 +92,93 @@ const CONFIG = {
 class IT8951 {
 	constructor(options = {}) {
 		this.config = { ...CONFIG, ...options };
+		this.transport = options.transport || new LinuxSpiGpioTransport(this.config);
+		this.logger = options.logger || createLogger(this.config.LOG_ENABLED !== false);
 
 		if (this.config.MODE_A2) {
 			DISPLAY_UPDATE_MODE_A2 = this.config.MODE_A2;
 		}
 	}
 
-	init() {
+	init({ clear = true, configure = true } = {}) {
+		if (this.initialized) return this;
 		this.initialized = true;
 
-		this.gpio = rpio;
-		this.gpio.init({ mapping: 'physical', gpiomem: false });
+		this.gpio = this.transport;
+		try {
+			this.gpio.init({ mapping: 'physical', gpiomem: false });
 
-		this.gpio.spiBegin();
-		this.gpio.spiSetClockDivider(this.config.SPI_CLOCK_DIVIDER);
+			this.gpio.spiBegin();
+			this.gpio.spiSetClockDivider(this.config.SPI_CLOCK_DIVIDER);
 
-		this.gpio.open(this.config.PINS.CS, this.gpio.OUTPUT);
-		this.gpio.open(this.config.PINS.RST, this.gpio.OUTPUT, this.gpio.HIGH);
-		this.gpio.open(this.config.PINS.BUSY, this.gpio.INPUT, this.gpio.PULL_DOWN);
+			this.gpio.open(this.config.PINS.CS, this.gpio.OUTPUT);
+			this.gpio.open(this.config.PINS.RST, this.gpio.OUTPUT, this.gpio.HIGH);
+			this.gpio.open(this.config.PINS.BUSY, this.gpio.INPUT, this.gpio.PULL_DOWN);
 
-		this.reset();
-		this.activate();
-		this.wait_for_ready();
+			this.reset();
+			this.activate();
+			this.wait_for_ready();
 
-		// Get Device Info
-		this.write_command(CMD_GET_DEVICE_INFO);
-		const device_info = this.read_data(40);
+			// Get Device Info
+			this.write_command(CMD_GET_DEVICE_INFO);
+			const device_info = this.read_data(40);
 
-		// Parse device info: 4 x uint16 BE + 2 x 16-byte strings
-		const width = device_info.readUInt16BE(0);
-		const height = device_info.readUInt16BE(2);
-		const img_addr_l = device_info.readUInt16BE(4);
-		const img_addr_h = device_info.readUInt16BE(6);
-		const firmware_version = device_info.subarray(8, 24).toString('ascii');
-		const lut_version = device_info.subarray(24, 40).toString('ascii');
+			// Parse device info: 4 x uint16 BE + 2 x 16-byte strings
+			const width = device_info.readUInt16BE(0);
+			const height = device_info.readUInt16BE(2);
+			const img_addr_l = device_info.readUInt16BE(4);
+			const img_addr_h = device_info.readUInt16BE(6);
+			const firmware_version = device_info.subarray(8, 24).toString('ascii');
+			const lut_version = device_info.subarray(24, 40).toString('ascii');
 
-		this.width = width;
-		this.height = height;
-		this.img_addr = (img_addr_h << 16) | img_addr_l;
+			validateDimensions(width, height);
+			this.width = width;
+			this.height = height;
+			this.img_addr = (img_addr_h << 16) | img_addr_l;
+			this.deviceInfo = {
+				width,
+				height,
+				image_address: this.img_addr,
+				firmware: fixString(firmware_version).replace(/\0.*$/, '').trim(),
+				lut: fixString(lut_version).replace(/\0.*$/, '').trim(),
+			};
 
-		console.log('width =', this.width);
-		console.log('height =', this.height);
-		console.log('img_addr =', this.img_addr.toString(16));
-		console.log('firmware =', fixString(firmware_version));
-		console.log('lut =', fixString(lut_version));
+			this.logger.info('width =', this.width);
+			this.logger.info('height =', this.height);
+			this.logger.info('img_addr =', this.img_addr.toString(16));
+			this.logger.info('firmware =', fixString(firmware_version));
+			this.logger.info('lut =', fixString(lut_version));
 
-		// Set to Enable I80 Packed mode
-		console.log('IT8951: Enabling I80 packed mode...');
-		this.write_register(REG_I80CPCR, 0x0001);
+			if (configure) {
+				// Set to Enable I80 Packed mode
+				this.logger.info('IT8951: Enabling I80 packed mode...');
+				this.write_register(REG_I80CPCR, 0x0001);
 
-		const currentVcom = this.get_vcom();
-		if (this.config.VCOM !== currentVcom) {
-			console.warn(`VCOM mismatch: device=${currentVcom}, config=${this.config.VCOM}. Updating...`);
-			this.set_vcom(this.config.VCOM);
-			console.log('VCOM =', `${(this.get_vcom() / 1000.0) * -1}v`);
-		} else {
-			console.log('VCOM =', `${(currentVcom / 1000.0) * -1}v (OK)`);
+				const currentVcom = this.get_vcom();
+				if (this.config.VCOM == null) {
+					this.logger.info('VCOM =', `${(currentVcom / 1000.0) * -1}v (device-stored, no override)`);
+				} else if (this.config.VCOM !== currentVcom) {
+					this.logger.warn(`VCOM override: device=${currentVcom}, config=${this.config.VCOM}. Updating...`);
+					this.set_vcom(this.config.VCOM);
+					this.logger.info('VCOM =', `${(this.get_vcom() / 1000.0) * -1}v`);
+				} else {
+					this.logger.info('VCOM =', `${(currentVcom / 1000.0) * -1}v (OK)`);
+				}
+			}
+
+			if (clear) {
+				this.logger.info('IT8951: Clearing display (INIT mode)...');
+				this.wait_for_ready();
+				this.clear(0xFF, DISPLAY_UPDATE_MODE_INIT);
+			}
+			this.logger.info('IT8951: Init complete.');
+			return this;
+		} catch (error) {
+			this.initialized = false;
+			try { this.gpio.spiEnd(); } catch (_) { /* retain original error */ }
+			try { this.gpio.exit(); } catch (_) { /* retain original error */ }
+			throw error;
 		}
-
-		// Initialize the display with a blank image
-		console.log('IT8951: Clearing display (INIT mode)...');
-		this.wait_for_ready();
-		this.clear(0xFF, DISPLAY_UPDATE_MODE_INIT);
-		console.log('IT8951: Init complete.');
 	}
 
 	/** I/O Functions **************************************************************/
@@ -164,12 +201,15 @@ class IT8951 {
 
 		this.wait_for_ready();
 		this.gpio.write(this.config.PINS.CS, this.gpio.LOW);
-		this.gpio.usleep(10);
-		this.spi_write(bytesFrom16(preamble));
-		this.wait_for_ready();
-		this.spi_write(bytesFrom16(cmd));
-		this.gpio.write(this.config.PINS.CS, this.gpio.HIGH);
-		this.gpio.usleep(10);
+		try {
+			this.gpio.usleep(10);
+			this.spi_write(bytesFrom16(preamble));
+			this.wait_for_ready();
+			this.spi_write(bytesFrom16(cmd));
+		} finally {
+			this.gpio.write(this.config.PINS.CS, this.gpio.HIGH);
+			this.gpio.usleep(10);
+		}
 
 		if (params) {
 			for (const param of params) this.write_data(bytesFrom16(param));
@@ -181,16 +221,19 @@ class IT8951 {
 
 		this.wait_for_ready();
 		this.gpio.write(this.config.PINS.CS, this.gpio.LOW);
-		this.gpio.usleep(10);
-		this.spi_write(bytesFrom16(preamble));
-		this.wait_for_ready();
+		try {
+			this.gpio.usleep(10);
+			this.spi_write(bytesFrom16(preamble));
+			this.wait_for_ready();
 
-		for (let i = 0; i < data.length; i += this.config.MAX_BUFFER_SIZE) {
-			const chunk = data.slice(i, i + this.config.MAX_BUFFER_SIZE);
-			this.spi_write(chunk);
+			for (let i = 0; i < data.length; i += this.config.MAX_BUFFER_SIZE) {
+				const chunk = data.slice(i, i + this.config.MAX_BUFFER_SIZE);
+				this.spi_write(chunk);
+			}
+		} finally {
+			this.gpio.write(this.config.PINS.CS, this.gpio.HIGH);
+			this.gpio.usleep(10);
 		}
-		this.gpio.write(this.config.PINS.CS, this.gpio.HIGH);
-		this.gpio.usleep(10);
 	}
 
 	read_data(n) {
@@ -198,19 +241,21 @@ class IT8951 {
 
 		this.wait_for_ready();
 		this.gpio.write(this.config.PINS.CS, this.gpio.LOW);
-		this.gpio.usleep(10);
-		this.spi_write(bytesFrom16(preamble));
-		this.wait_for_ready();
+		try {
+			this.gpio.usleep(10);
+			this.spi_write(bytesFrom16(preamble));
+			this.wait_for_ready();
 
-		this.spi_read(2); // Dummy read
-		this.wait_for_ready();
+			this.spi_read(2); // Dummy read
+			this.wait_for_ready();
 
-		const result = this.spi_read(n);
-		this.wait_for_ready();
-
-		this.gpio.write(this.config.PINS.CS, this.gpio.HIGH);
-		this.gpio.usleep(10);
-		return result;
+			const result = this.spi_read(n);
+			this.wait_for_ready();
+			return result;
+		} finally {
+			this.gpio.write(this.config.PINS.CS, this.gpio.HIGH);
+			this.gpio.usleep(10);
+		}
 	}
 
 	write_register(address, value) {
@@ -271,9 +316,12 @@ class IT8951 {
 	}
 
 	draw(buffer, x, y, w, h, display_mode = false) {
-		this.wait_for_display_ready();
+		if (x == null) x = 0;
+		if (y == null) y = 0;
 		if (!w) w = this.width;
 		if (!h) h = this.height;
+		validateDrawBuffer(buffer, x, y, w, h, this.config.BPP, this.width, this.height);
+		this.wait_for_display_ready();
 
 		// Workaround for 4-byte alignment on some Waveshare devices
 		if (this.config.ALIGN4BYTES && this.config.BPP === 1) {
@@ -291,15 +339,17 @@ class IT8951 {
 		];
 		this.write_command(CMD_LOAD_IMAGE_AREA, params);
 
+		let txBuffer = buffer;
 		if (this.config.SWAP_BUFFER_ENDIANESS) {
-			for (let i = 0; i < Math.trunc(buffer.length / 2) * 2; i += 2) {
-				const tmp = buffer[i];
-				buffer[i] = buffer[i + 1];
-				buffer[i + 1] = tmp;
+			txBuffer = Buffer.from(buffer);
+			for (let i = 0; i < Math.trunc(txBuffer.length / 2) * 2; i += 2) {
+				const tmp = txBuffer[i];
+				txBuffer[i] = txBuffer[i + 1];
+				txBuffer[i + 1] = tmp;
 			}
 		}
 
-		this.write_data(buffer);
+		this.write_data(txBuffer);
 		this.write_command(CMD_LOAD_IMAGE_END);
 
 		let update_mode = (this.config.BPP === 1) ? DISPLAY_UPDATE_MODE_A2 : DISPLAY_UPDATE_MODE_GC16;
@@ -356,13 +406,19 @@ class IT8951 {
 
 	close() {
 		if (!this.initialized) return;
-		this.initialized = false;
 
-		console.log('Setting display to standby');
-		this.sleep();
-		this.wait(3000);
-		this.gpio.spiEnd();
-		this.gpio.exit();
+		this.logger.info('Setting display to standby');
+		try {
+			this.sleep();
+			this.wait(3000);
+		} finally {
+			this.initialized = false;
+			try {
+				this.gpio.spiEnd();
+			} finally {
+				this.gpio.exit();
+			}
+		}
 	}
 }
 
@@ -402,8 +458,31 @@ function roundTo32(v) {
 	return v - (v % 32);
 }
 
+function validateDimensions(width, height) {
+	if (!Number.isInteger(width) || !Number.isInteger(height)
+		|| width <= 0 || height <= 0 || width === 0xFFFF || height === 0xFFFF) {
+		throw new Error(`IT8951 returned invalid display dimensions ${width}x${height}`);
+	}
+}
+
+function validateDrawBuffer(buffer, x, y, w, h, bpp, displayWidth, displayHeight) {
+	if (!Buffer.isBuffer(buffer)) throw new TypeError('IT8951 draw buffer must be a Buffer');
+	if (![x, y, w, h].every(Number.isInteger) || x < 0 || y < 0 || w <= 0 || h <= 0) {
+		throw new RangeError(`Invalid IT8951 draw area x=${x}, y=${y}, width=${w}, height=${h}`);
+	}
+	if (displayWidth && displayHeight && (x + w > displayWidth || y + h > displayHeight)) {
+		throw new RangeError(`IT8951 draw area ${x},${y} ${w}x${h} exceeds ${displayWidth}x${displayHeight}`);
+	}
+	const expectedLength = (w * h * bpp) / 8;
+	if (!Number.isInteger(expectedLength) || buffer.length !== expectedLength) {
+		throw new RangeError(`IT8951 expected ${expectedLength} bytes for ${w}x${h} at ${bpp}BPP, received ${buffer.length}`);
+	}
+}
+
 // Export the class and constants for testing/advanced use
 module.exports = IT8951;
 module.exports.DISPLAY_UPDATE_MODE_INIT = DISPLAY_UPDATE_MODE_INIT;
 module.exports.DISPLAY_UPDATE_MODE_GC16 = DISPLAY_UPDATE_MODE_GC16;
 module.exports.DISPLAY_UPDATE_MODE_A2 = DISPLAY_UPDATE_MODE_A2;
+module.exports.LinuxSpiGpioTransport = LinuxSpiGpioTransport;
+module.exports.createLogger = createLogger;

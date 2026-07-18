@@ -19,7 +19,9 @@ See: https://www.waveshare.com/wiki/Template:EPaper_Codes_Descriptions-IT8951
 ![Action Shot](https://i.postimg.cc/bwyHScRc/it8951.png)
 
 ## Dependencies
-1. [GPIO](https://github.com/jperkin/node-rpio)
+1. Linux transport optional dependencies (installed automatically when available):
+    * [opengpio](https://www.npmjs.com/package/opengpio)
+    * [spi-device](https://www.npmjs.com/package/spi-device)
 
 ## Getting Started
   ```sh
@@ -29,8 +31,23 @@ See: https://www.waveshare.com/wiki/Template:EPaper_Codes_Descriptions-IT8951
 ## Example Code
 ```js
     const IT8951 = require('node-it8951');
+    const LinuxSpiGpioTransport = require('node-it8951/linux');
 
-    const display = new IT8951({ MAX_BUFFER_SIZE: 32797, ALIGN4BYTES: true });
+    const transport = new LinuxSpiGpioTransport({
+        bus: 1,
+        device: 0,
+        speed_hz: 12000000,
+        gpio_chip: '/dev/gpiochip1',
+        reset_line: 226,
+        busy_line: 228,
+        cs_line: 229,
+    });
+
+    const display = new IT8951({
+        MAX_BUFFER_SIZE: 32797,
+        ALIGN4BYTES: true,
+        transport,
+    });
     display.init();
     display.wait(2000);
     sample4BPP(display);
@@ -100,6 +117,9 @@ Constructor that takes in a suite of parameters
         SWAP_BUFFER_ENDIANESS: true, // Repacks the buffer to Llittle Endian format
     };
 ```
+
+You can inject any transport implementation that exposes the same SPI/GPIO
+methods as the Linux transport exported by `node-it8951/linux`.
 
 `IT8951.init()`  
 Runs the initialization sequence (Required).  
